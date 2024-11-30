@@ -1,0 +1,74 @@
+name: paperStream
+
+on:
+  workflow_dispatch:
+    inputs:
+      query_date:
+        description: 'Please enter the date in a valid format (e.g., "yyyy-MM-dd").'
+        required: false
+        default: ""
+  schedule:
+    - cron: '30 5 * * *'
+
+jobs:
+  archive_newspaper:
+    runs-on: windows-latest
+    permissions: write-all
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Newspaper
+        shell: pwsh
+        id: download_newspaper
+        run: |
+          # Set query date or use today's date
+          $inputDate = '${{ inputs.query_date }}'
+          $queryDate = if ($inputDate) { $inputDate } else { Get-Date -Format "yyyy-MM-dd" }
+
+          # Retrieve information from the source
+          try {
+              $newspaperSourceJSON = Invoke-RestMethod -Uri "https://epaper.thehindu.com/ccidist-ws/th/th_international/issues/?start=&limit=&epubName=th_international_web&fromDate=$queryDate&toDate=$queryDate&issueNameContains=&sortOrder=desc&submit=Submit+Query" -ErrorAction Stop
+              $newspaperSourceName = $newspaperSourceJSON.organizationTitle
+              $newspaperSourceDate = [datetime]::ParseExact($newspaperSourceJSON.issues.web.title, "dd-MM-yyyy", $null).ToString("yyyy-MM-dd")
+              $newspaperSourceLink = $newspaperSourceJSON.issues.web.url
+          } catch {
+              Write-Error "Failed to retrieve newspaper data: $_"
+              exit 1
+          }
+
+          # Construct information from the source
+          $newspaperArchiveName = "${newspaperSourceName} ${newspaperSourceDate}.pdf"
+          $newspaperArchivePath = Join-Path -Path $env:GITHUB_WORKSPACE -ChildPath $newspaperArchiveName
+
+          # Download newspaper from the source
+          try {
+              Invoke-WebRequest -Uri "${newspaperSourceLink}pagespdffull?download=true" -OutFile $newspaperArchivePath -Headers @{"Cookie" = "${{ secrets.COOKIE }}"} -ErrorAction Stop
+              echo "newspaperArchivePath=$newspaperArchivePath" >> $env:GITHUB_ENV
+          } catch {
+              Write-Error "Failed to download the newspaper: $_"
+              exit 1
+          }
+
+      - name: Telegram Newspaper
+        shell: pwsh
+        id: telegram_newspaper
+        run: |
+          $telegramFROM = '${{ secrets.TELEGRAM_FROM }}'
+          $telegramTO = '${{ secrets.TELEGRAM_TO }}'
+          $telegramDOCUMENT = '${{ env.newspaperArchivePath }}'
+
+          # Upload newspaper via Telegram
+          $telegramAPI = "https://api.telegram.org/bot$telegramFROM/sendDocument"
+          $params = @{
+              chat_id = $telegramTO
+              document = Get-Item $telegramDOCUMENT
+          }
+
+          try {
+              Invoke-RestMethod -Uri $telegramAPI -Method Post -Form $params -ErrorAction Stop
+          } catch {
+              Write-Error "Failed to send the document via Telegram: $_"
+              exit 1
+          }
